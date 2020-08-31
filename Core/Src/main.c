@@ -26,6 +26,8 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include<stdio.h>
+#include "TJ_MPU6050.h"
+#include "STM32_HCSR04.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +45,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
@@ -50,26 +54,29 @@ UART_HandleTypeDef huart2;
 
 osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
-uint32_t IC_Val1 = 0;
-uint32_t IC_Val2 = 0;
-uint32_t Difference = 0;
-uint8_t Is_First_Captured = 0;  // is the first value captured ?
-uint8_t Distance  = 0;
 
-#define TRIG_PIN GPIO_PIN_9
-#define TRIG_PORT GPIOA
+osThreadId MPU6050TaskHandle;
+
+
+uint8_t Distance  = 0;
+uint16_t DevAddress=(0x68 << 1);
+
+
+RawData_Def myAccelRaw, myGyroRaw;
+ScaledData_Def myAccelScaled, myGyroScaled;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-
+void StartMPU6050Task(void const * argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -84,7 +91,9 @@ void StartDefaultTask(void const * argument);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+	uint8_t check;
 
+	MPU_ConfigTypeDef myMpuConfig;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -106,10 +115,21 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_I2C1_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+   HAL_I2C_Mem_Read(&hi2c1, DevAddress, 0x75,1, &check,1,1000);
 
+   //1. Initialise the MPU6050 module and I2C
+   	MPU6050_Init(&hi2c1);
+   	//2. Configure Accel and Gyro parameters
+   	myMpuConfig.Accel_Full_Scale = AFS_SEL_4g;
+   	myMpuConfig.ClockSource = Internal_8MHz;
+   	myMpuConfig.CONFIG_DLPF = DLPF_184A_188G_Hz;
+   	myMpuConfig.Gyro_Full_Scale = FS_SEL_500;
+   	myMpuConfig.Sleep_Mode_Bit = 0;  //1: sleep mode, 0: normal mode
+   	MPU6050_Config(&myMpuConfig);
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -135,6 +155,10 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+  osThreadDef(MPU6050Task, StartMPU6050Task, osPriorityNormal, 0, 128);
+  MPU6050TaskHandle = osThreadCreate(osThread(MPU6050Task), NULL);
+
+
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
   /* USER CODE END RTOS_THREADS */
 
@@ -195,6 +219,40 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 10000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -347,56 +405,25 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)  // if the interrupt source is channel1
-		{
-			if (Is_First_Captured==0) // if the first value is not captured
-			{
-				IC_Val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1); // read the first value
-				Is_First_Captured = 1;  // set the first captured as true
-				// Now change the polarity to falling edge
-				__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_FALLING);
-			}
-
-			else if (Is_First_Captured==1)   // if the first is already captured
-			{
-				IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);  // read second value
-				__HAL_TIM_SET_COUNTER(htim, 0);  // reset the counter
-
-				if (IC_Val2 > IC_Val1)
-				{
-					Difference = IC_Val2-IC_Val1;
-				}
-
-				else if (IC_Val1 > IC_Val2)
-				{
-					Difference = (0xffff - IC_Val1) + IC_Val2;
-				}
-
-				Distance = Difference * .034/2;
-				Is_First_Captured = 0; // set it back to false
-
-				// set polarity to rising edge
-				__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_RISING);
-				__HAL_TIM_DISABLE_IT(&htim2, TIM_IT_CC1);
-			}
-		}
+	HAL_TIM_IC_CaptureCallback_HCSR04_Ch1(htim,&Distance);
 
 }
 
-void delay_us(uint16_t time)
-{
-	__HAL_TIM_SET_COUNTER(&htim2,0);
-	while(__HAL_TIM_GET_COUNTER(&htim2) < time );
-}
 
-void HCSR04_Read (void)
+void StartMPU6050Task(void const * argument)
 {
-	HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_SET);  // pull the TRIG pin HIGH
-	delay_us(100);  // wait for 10 us
-	//HAL_Delay(1);
-	HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);  // pull the TRIG pin low
 
-	__HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
+	/* Infinite loop */
+	  for(;;)
+	  {
+		  //Raw data
+		  MPU6050_Get_Accel_RawData(&myAccelRaw);
+		  MPU6050_Get_Gyro_RawData(&myGyroRaw);
+		  //scaled
+		 MPU6050_Get_Accel_Scale(&myAccelScaled);
+		  MPU6050_Get_Gyro_Scale(&myGyroScaled);
+		  osDelay(1);
+	  }
 }
 /* USER CODE END 4 */
 
@@ -416,7 +443,7 @@ void StartDefaultTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-	HCSR04_Read ();
+	HCSR04_Read (&htim2);
 //	HAL_Delay(1);
 	//Send Distance to Nextion display
 	sprintf(pData,"n0.val=%d",Distance%400);
